@@ -21,3 +21,69 @@ docker run -it --rm \
     -p 8000:8000 \
     nvcr.io/nim/nvidia/llama-3.2-nemoretriever-300m-embed-v2:latest
 ```
+
+
+## Downaload vLLM model
+### Method 1: Using huggingface-cli (Recommended)
+
+```
+# Install huggingface_hub if not already installed
+pip install huggingface_hub
+
+# Set your model download folder
+export MODEL_FOLDER=/home/rakshit/models/llm/ministral-3-8b
+mkdir -p "$MODEL_FOLDER"
+
+# Download the model to specific folder
+huggingface-cli download mistralai/Ministral-3-8B-Instruct-2512 \
+  --local-dir "$MODEL_FOLDER" \
+  --local-dir-use-symlinks False
+
+# Wait for download to complete (this will take several minutes)
+```
+
+### Then run vLLM with the local folder:
+```
+# Use the downloaded model folder
+vllm serve "$MODEL_FOLDER" \
+  --host 0.0.0.0 \
+  --port 8003 \
+  --gpu-memory-utilization 0.90 \
+  --max-model-len 8192 \
+  --trust-remote-code \
+  --dtype auto
+```
+
+
+## Method 1: Using Official vLLM Docker Image
+
+```
+# Set your model folder path
+export LLM_FOLDER=/home/rakshit/models/llm/ministral-3-8b
+export HF_HOME=/home/rakshit/models/hf-cache
+
+# Create cache folder
+mkdir -p "$HF_HOME"
+
+# Pull vLLM Docker image
+docker pull vllm/vllm-openai:latest
+
+# Run vLLM with your local model
+docker run -d \
+  --name vllm-server \
+  --runtime nvidia \
+  --gpus all \
+  --shm-size=16g \
+  -v "$LLM_FOLDER:/model" \
+  -v "$HF_HOME:/root/.cache/huggingface" \
+  -p 8003:8000 \
+  -e HUGGING_FACE_HUB_TOKEN=$HF_TOKEN \
+  vllm/vllm-openai:latest \
+  --model /model \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --gpu-memory-utilization 0.90 \
+  --max-model-len 8192 \
+  --trust-remote-code \
+  --dtype auto
+```
