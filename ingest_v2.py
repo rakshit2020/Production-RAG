@@ -1,9 +1,8 @@
 """
-Data Ingestion Pipeline V2 for Normalized Chandra RAG
+Data Ingestion Pipeline V2 for Normalized Chandra OCR OUTPUT RAG
 
 Uses our improved chunking strategy + NVIDIA NIM + Milvus
 
-This is a NEW file - does not modify existing ingest.py
 """
 
 import os
@@ -88,6 +87,8 @@ def clean_metadata(chunk) -> dict:
         "year": int(year),
         "month": month,
         "report_type": str(chunk.metadata.get("report_type", "unknown")),
+        "doc_name": str(chunk.metadata.get("file_name", "unknown")),
+        "source": str(chunk.metadata.get("file_path", "unknown")),
     }
 
 
@@ -141,7 +142,7 @@ def ingest_documents(file_paths: List[str], drop_old: bool = True):
     print(f"{'='*60}")
 
     # Step 1: Chunk using improved chunker
-    print("\n📝 Step 1: Chunking documents with improved strategy...")
+    print("\n Step 1: Chunking documents with improved strategy...")
     chunker = ImprovedChunker(max_chunk_size=Config.CHUNK_MAX_SIZE)
     results = chunker.process_documents(file_paths)
 
@@ -153,7 +154,7 @@ def ingest_documents(file_paths: List[str], drop_old: bool = True):
     print(f"   - Parent chunks: {len(parent_chunks)}")
 
     # Step 2: Convert to LangChain format
-    print("\n🔄 Step 2: Converting to LangChain format...")
+    print("\n Step 2: Converting to LangChain format...")
     docs = chunk_to_langchain_doc(child_chunks, parent_chunks)
     print(f"   - Total LangChain docs: {len(docs)}")
 
@@ -162,12 +163,12 @@ def ingest_documents(file_paths: List[str], drop_old: bool = True):
     print(f"   - Large docs (>60K chars): {len(large_docs)}")
 
     # Step 3: Initialize embeddings
-    print("\n🔗 Step 3: Initializing NVIDIA NIM embeddings...")
+    print("\n Step 3: Initializing NVIDIA NIM embeddings...")
     embeddings = get_embeddings()
     print(f"   - Model: {Config.EMBEDDING_MODEL}")
 
     # Step 4: Ingest to Milvus
-    print("\n🗄️  Step 4: Ingesting to Milvus...")
+    print("\n Step 4: Ingesting to Milvus...")
     print(f"   - Collection: {Config.COLLECTION_NAME}")
     print(f"   - Milvus URI: {Config.MILVUS_URI}")
 
@@ -204,7 +205,6 @@ def run_full_ingestion():
     if len(file_paths) > 5:
         print(f"   ... and {len(file_paths) - 5} more")
 
-    # Run ingestion
     vectorstore = ingest_documents(file_paths, drop_old=True)
     return vectorstore
 

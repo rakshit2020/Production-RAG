@@ -1,7 +1,5 @@
 """
-RAG Retrieval Pipeline V2 for Normalized Chandra
-
-This is a NEW file - does not modify existing retrieval.py
+RAG Retrieval Pipeline V2 for Normalized OCR OUTPUT Chandra
 
 Key features for our approach:
 - Parent-child chunk retrieval (when child matches, can fetch parent for full context)
@@ -14,7 +12,7 @@ import logging
 from typing import List, Dict, Any, Optional
 from collections import deque
 from langchain_core.documents import Document
-import asyncio
+import asyncio  
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.messages import HumanMessage, AIMessage
@@ -111,7 +109,7 @@ def get_llm():
 
 
 # ============== VECTOR STORE ==============
-def get_vectorstore() -> Milvus:
+async def get_vectorstore() -> Milvus:
     """Connect to Milvus collection"""
     embeddings = get_embeddings()
     vectorstore = Milvus(
@@ -306,17 +304,148 @@ Answer:""")
     return chain
 
 
+def generate_answer_with_history(
+    question: str,
+    rewritten_question: str,
+    context: str,
+    chat_history: "ChatHistory"
+) -> str:
+    """
+    Generate answer with chat history awareness.
+    """
+    llm = get_llm()
+
+    # Build prompt based on whether there's history
+    if chat_history.history:
+        # Use history-aware prompt
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are an AI assistant that answers questions based on the provided context
+and previous conversation history.
+
+STRICT RULES:
+- Only use information explicitly present in the provided context.
+- Never generate fictional incidents, vessel names, statistics, or dates.
+- If information is missing, say so clearly.
+- Use previous conversation to understand context (e.g., "that ship" refers to previous mentions)
+
+When answering:
+1. If exact answer exists → provide with all relevant details.
+2. If partially available → provide details and state limitations.
+3. If not available → state that information is not in dataset."""),
+            ("human", """Previous Conversation:
+{chat_history}
+
+Context:
+{context}
+
+Original Question: {original_question}
+Rewritten Question: {rewritten_question}
+
+Answer:""")
+        ])
+
+        chain = prompt | llm | StrOutputParser()
+        answer = chain.invoke({
+            "chat_history": chat_history.get_formatted_history(),
+            "context": context,
+            "original_question": question,
+            "rewritten_question": rewritten_question
+        })
+    else:
+        # No history - use standard prompt
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """You are an AI assistant that answers questions based on the provided context
+from piracy and armed robbery reports against ships.
+
+STRICT RULES:
+- Only use information explicitly present in the provided context.
+- Never generate fictional incidents, vessel names, statistics, or dates.
+- If information is missing, say so clearly.
+
+When answering:
+1. If exact answer exists → provide with all relevant details.
+2. If partially available → provide details and state limitations.
+3. If not available → state that information is not in dataset."""),
+            ("human", """Context:
+{context}
+
+Question: {question}
+
+Answer:""")
+        ])
+
+        chain = prompt | llm | StrOutputParser()
+        answer = chain.invoke({
+            "context": context,
+            "question": question
+        })
+
+    return answer
+
+
 # ============== MAIN QUERY FUNCTIONS ==============
+
+def contextualize_question(question: str, chat_history: "ChatHistory") -> str:
+    """
+    Query rewriting: Reformulate question using chat history.
+
+    If user asks "What about ships in April?" after asking about 2024,
+    this rewrites to "What ships were in April 2024?"
+    """
+    if not chat_history.history:
+        return question
+
+    # Only rewrite if there's history
+    llm = get_llm()
+
+    contextualize_prompt = ChatPromptTemplate.from_messages([
+        ("system", """You are a query rewriter.
+
+    Your task:
+    - If the follow-up question depends on chat history, rewrite it into a standalone question by ONLY resolving references (e.g., pronouns like "it", "that ship", etc.).
+    - Do NOT add new details.
+    - Do NOT expand the scope.
+    - Do NOT infer or guess additional fields.
+    - Keep the rewritten question as close as possible to the original wording.
+    - If the question is already standalone, return it unchanged.
+    - If the input is a greeting or not a real question (e.g., "hi", "hello"), return it unchanged.
+
+    Return ONLY the final question text.
+    """),
+    ("human", """Chat History:  
+    {chat_history}
+
+    Follow-up Question: {question}
+    
+    Standalone Question:""")
+    ])
+
+    chain = contextualize_prompt | llm | StrOutputParser()
+
+    try:
+        rewritten = chain.invoke({
+            "chat_history": chat_history.get_formatted_history(),
+            "question": question
+        })
+        rewritten = rewritten.strip()
+        logger.info(f"Original: {question} -> Rewritten: {rewritten}")
+        return rewritten
+    except Exception as e:
+        logger.warning(f"Query rewrite failed: {e}, using original")
+        return question
+
 
 def query_rag(
     question: str,
     filters: Optional[Dict[str, Any]] = None,
     use_parent_context: bool = True,
     use_reranker: bool = True,
-    return_docs: bool = False
+    return_docs: bool = False,
+    chat_history: Optional["ChatHistory"] = None,
+    use_query_rewrite: bool = True
 ) -> Dict[str, Any]:
     """
-    Main query function for RAG.
+    Main query function for RAG with chat history support.
 
     Args:
         question: The question to ask
@@ -324,37 +453,65 @@ def query_rag(
         use_parent_context: Whether to fetch parent documents for context
         use_reranker: Whether to use reranking
         return_docs: Whether to return the retrieved documents
+        chat_history: Optional ChatHistory object for conversation context
+        use_query_rewrite: Whether to rewrite question using history
 
     Returns:
         Dict with 'answer' and optionally 'documents'
     """
     logger.info(f"Query: {question}")
     logger.info(f"Filters: {filters}")
+    logger.info(f"Chat history: {'Yes' if chat_history and chat_history.history else 'No'}")
+
+    # Initialize chat history if not provided
+    if chat_history is None:
+        chat_history = ChatHistory(max_turns=Config.MAX_HISTORY_TURNS)
+
+    # Step 1: Query rewriting (if history exists and enabled)
+    original_question = question
+    if use_query_rewrite and chat_history.history:
+        question = contextualize_question(question, chat_history)
 
     # Get vectorstore
-    vectorstore = get_vectorstore()
+    vectorstore = asyncio.run(get_vectorstore())
 
     # Get raw client for parent retrieval
     milvus_client = get_milvus_client()
 
-    # Retrieve documents
+    # Step 2: Retrieve documents
     if use_parent_context:
         docs = retrieve_with_parent_context(question, vectorstore, milvus_client, k=Config.TOP_K_RETRIEVAL)
     else:
         docs = retrieve_documents(question, vectorstore, filters=filters)
 
-    # Rerank if enabled
+    # Step 3: Rerank if enabled
     if use_reranker and docs:
         docs = rerank_documents(question, docs)
 
-    # Format context
+    # Step 4: Format context with history
+    history_context = chat_history.get_formatted_history() if chat_history.history else None
     context = format_docs(docs, include_metadata=True)
 
-    # Generate answer
-    chain = create_rag_chain()
-    answer = chain.invoke({"context": context, "question": question})
+    if history_context and history_context != "No previous conversation.":
+        context = f"Previous Conversation:\n{history_context}\n\n---\n\nRelevant Documents:\n{context}"
+
+    # Step 5: Generate answer with history-aware prompt
+    answer = generate_answer_with_history(
+        question=original_question,
+        rewritten_question=question,
+        context=context,
+        chat_history=chat_history
+    )
+
+    # Update chat history
+    chat_history.add_turn(original_question, answer)
 
     result = {"answer": answer}
+
+    if return_docs:
+        result["documents"] = docs
+
+    return result
 
     if return_docs:
         result["documents"] = docs
@@ -512,11 +669,12 @@ def main():
                 question,
                 filters=current_filters if current_filters else None,
                 use_parent_context=True,
-                use_reranker=True,
-                return_docs=False
+                use_reranker=True,      
+                return_docs=True,chat_history=chat_history
             )
 
             print(f"\nAssistant: {result['answer']}")
+            # print(f"\nDocuments: {result['documents']}")
 
         except KeyboardInterrupt:
             print("\n\nGoodbye!")
